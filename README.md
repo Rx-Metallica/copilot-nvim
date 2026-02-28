@@ -44,7 +44,7 @@ gh extension install github/gh-copilot
 ### 3. Clone this plugin
 
 ```bash
-git clone https://github.com/yourusername/copilot-nvim.git
+git clone https://github.com/Rx-Metallica/copilot-nvim.git
 ```
 
 ### 4. Install Node.js dependencies
