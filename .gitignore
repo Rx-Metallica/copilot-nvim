@@ -1,0 +1,9 @@
+New-Item .gitignore -Force
+```
+
+Open it and paste:
+```
+node/node_modules/
+node/dist/
+*.log
+.DS_Store
