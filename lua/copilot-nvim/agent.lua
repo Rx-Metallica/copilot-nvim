@@ -1,116 +1,110 @@
 local M = {}
 local core = require("copilot-nvim")
 
-local agent_buf = nil
-local agent_win = nil
-local input_buf = nil
-local input_win = nil
-local term_buf = nil
-local term_win = nil
+local agent_buf, agent_win
+local input_buf, input_win
+local term_buf, term_win
+local term_job_id
 
--- Append to agent chat buffer
+-- Append text to chat buffer safely
 function M._append(text)
   vim.schedule(function()
     if not agent_buf or not vim.api.nvim_buf_is_valid(agent_buf) then return end
+
     vim.api.nvim_buf_set_option(agent_buf, "modifiable", true)
     local lines = vim.split(text, "\n")
     local count = vim.api.nvim_buf_line_count(agent_buf)
     vim.api.nvim_buf_set_lines(agent_buf, count, -1, false, lines)
     vim.api.nvim_buf_set_option(agent_buf, "modifiable", false)
+
     if agent_win and vim.api.nvim_win_is_valid(agent_win) then
       vim.api.nvim_win_set_cursor(agent_win, { vim.api.nvim_buf_line_count(agent_buf), 0 })
     end
   end)
 end
 
--- Run a shell command in the terminal buffer
-function M._run_command(cmd)
-  vim.schedule(function()
-    if not term_win or not vim.api.nvim_win_is_valid(term_win) then return end
-    vim.api.nvim_set_current_win(term_win)
-    -- Send command to terminal
-    local term_id = vim.b[term_buf].terminal_job_id
-    if term_id then
-      vim.fn.chansend(term_id, cmd .. "\n")
-    end
-  end)
+-- Start proper Neovim terminal
+local function start_terminal()
+  vim.api.nvim_set_current_win(term_win)
+  vim.cmd("terminal cmd.exe")
+  term_buf = vim.api.nvim_get_current_buf()
+  term_job_id = vim.b.terminal_job_id
 end
 
--- Extract commands from Copilot response
-local function extract_commands(text)
-  local commands = {}
-  for cmd in text:gmatch("```bash\n(.-)\n```") do
-    table.insert(commands, cmd)
+-- Execute commands with confirmation
+local function execute_commands(commands)
+  if not term_job_id then
+    M._append("Terminal not ready.")
+    return
   end
-  -- Also match single line commands like `npm install`
-  for cmd in text:gmatch("`([^`]+)`") do
-    if cmd:match("^[a-z]") and not cmd:match("%s%s") then
-      table.insert(commands, cmd)
+
+  vim.ui.select({ "Yes", "No" }, {
+    prompt = "Execute agent commands?"
+  }, function(choice)
+    if choice ~= "Yes" then
+      M._append("Execution cancelled.")
+      return
     end
-  end
-  return commands
+
+    for _, cmd in ipairs(commands) do
+      M._append("")
+      M._append("▶ Running: " .. cmd)
+      vim.fn.chansend(term_job_id, cmd .. "\n")
+    end
+  end)
 end
 
 -- Open agent UI
 function M.open()
   if agent_win and vim.api.nvim_win_is_valid(agent_win) then
     vim.api.nvim_set_current_win(input_win)
+    vim.cmd("startinsert")
     return
   end
 
-  -- Agent chat buffer (top right)
+  -- Chat buffer
   agent_buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_option(agent_buf, "filetype", "markdown")
   vim.api.nvim_buf_set_option(agent_buf, "modifiable", false)
 
-  -- Input buffer (middle right)
+  -- Input buffer
   input_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_option(input_buf, "modifiable", true)
 
-  -- Terminal buffer (bottom)
+  -- Layout
   vim.cmd("botright vsplit")
   agent_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(agent_win, agent_buf)
-  vim.api.nvim_win_set_width(agent_win, 55)
+  vim.api.nvim_win_set_width(agent_win, 60)
 
-  -- Input window below agent
   vim.cmd("belowright split")
   input_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(input_win, input_buf)
   vim.api.nvim_win_set_height(input_win, 3)
 
-  -- Terminal window below input
   vim.cmd("belowright split")
   term_win = vim.api.nvim_get_current_win()
-  vim.cmd("terminal")
-  term_buf = vim.api.nvim_get_current_buf()
-  vim.api.nvim_win_set_height(term_win, 10)
+  vim.api.nvim_win_set_height(term_win, 12)
 
-  -- Welcome message
-  M._append("# Copilot Agent 🤖")
+  start_terminal()
+
+  -- Welcome
+  M._append("# Copilot Autonomous Agent 🤖")
   M._append("")
-  M._append("I can run commands for you!")
-  M._append("Try: 'list files in current directory'")
-  M._append("Or:  'create a hello.py file'")
+  M._append("Describe what you want to do.")
+  M._append("Example: create a new folder called test")
   M._append("---")
 
   -- Keymaps
-  vim.keymap.set("i", "<CR>", function()
-    M.send()
-  end, { buffer = input_buf, desc = "Agent: Send" })
-
-  vim.keymap.set("n", "<CR>", function()
-    M.send()
-  end, { buffer = input_buf, desc = "Agent: Send" })
-
-  vim.keymap.set("n", "q", function()
-    M.close()
-  end, { buffer = agent_buf, desc = "Agent: Close" })
+  vim.keymap.set("i", "<CR>", function() M.send() end, { buffer = input_buf })
+  vim.keymap.set("n", "<CR>", function() M.send() end, { buffer = input_buf })
+  vim.keymap.set("n", "q", function() M.close() end, { buffer = agent_buf })
 
   vim.api.nvim_set_current_win(input_win)
   vim.cmd("startinsert")
 end
 
--- Send message to agent
+-- Send to Copilot
 function M.send()
   if not input_buf or not vim.api.nvim_buf_is_valid(input_buf) then return end
 
@@ -118,65 +112,83 @@ function M.send()
   local message = table.concat(lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
   if message == "" then return end
 
-  vim.api.nvim_buf_set_lines(input_buf, 0, -1, false, {""})
+  vim.api.nvim_buf_set_lines(input_buf, 0, -1, false, { "" })
+
   M._append("")
   M._append("**You:** " .. message)
-  M._append("**Agent:** _thinking..._")
+  M._append("**Agent:** Thinking...")
 
-  local system_prompt = [[You are a terminal agent. When the user asks you to do something:
-1. Explain what you will do briefly
-2. Provide the exact shell command in a ```bash code block
-3. Keep responses concise
-The user is on Windows so use Windows-compatible commands.]]
+  local system_prompt = [[
+You are a Windows CMD automation agent.
 
-  core.request("chat", { message = system_prompt .. "\n\nUser request: " .. message, context = "" }, function(response)
+When given a task:
+1. Brief explanation
+2. Return JSON only in this format:
+
+{
+  "explanation": "short explanation",
+  "commands": ["command1", "command2"]
+}
+
+Rules:
+- Only valid Windows CMD commands
+- No markdown
+- No extra commentary
+]]
+
+  core.request("chat", {
+    message = system_prompt .. "\n\nUser request: " .. message,
+    context = ""
+  }, function(response)
+
     if not response.success then
-      M._append("**Error:** " .. response.error)
+      M._append("Error: " .. response.error)
       return
     end
 
-    vim.schedule(function()
-      -- Remove thinking line
-      if agent_buf and vim.api.nvim_buf_is_valid(agent_buf) then
-        vim.api.nvim_buf_set_option(agent_buf, "modifiable", true)
-        local count = vim.api.nvim_buf_line_count(agent_buf)
-        vim.api.nvim_buf_set_lines(agent_buf, count - 1, count, false, {})
-        vim.api.nvim_buf_set_option(agent_buf, "modifiable", false)
-      end
+    local ok, data = pcall(vim.fn.json_decode, response.result)
 
-      M._append("**Agent:** " .. response.result)
-      M._append("---")
+    if not ok or not data.commands then
+      M._append("Invalid agent response.")
+      M._append(response.result)
+      return
+    end
 
-      -- Auto run extracted commands in terminal
-      local commands = extract_commands(response.result)
-      if #commands > 0 then
-        M._append("_Running command in terminal..._")
-        M._run_command(commands[1])
-      end
-    end)
+    -- Remove thinking line
+    vim.api.nvim_buf_set_option(agent_buf, "modifiable", true)
+    local count = vim.api.nvim_buf_line_count(agent_buf)
+    vim.api.nvim_buf_set_lines(agent_buf, count - 1, count, false, {})
+    vim.api.nvim_buf_set_option(agent_buf, "modifiable", false)
+
+    M._append("**Agent:** " .. data.explanation)
+    M._append("---")
+
+    execute_commands(data.commands)
+
+    vim.api.nvim_set_current_win(input_win)
+    vim.cmd("startinsert")
   end)
 end
 
--- Close agent
+-- Close UI
 function M.close()
   for _, win in ipairs({ agent_win, input_win, term_win }) do
     if win and vim.api.nvim_win_is_valid(win) then
       vim.api.nvim_win_close(win, true)
     end
   end
-  agent_buf = nil
-  agent_win = nil
-  input_buf = nil
-  input_win = nil
-  term_buf = nil
-  term_win = nil
+
+  agent_buf, agent_win = nil, nil
+  input_buf, input_win = nil, nil
+  term_buf, term_win = nil, nil
+  term_job_id = nil
 end
 
--- Setup keymaps
+-- Setup keymap
 function M.setup()
   vim.keymap.set("n", "<leader>a", function()
     M.open()
-  end, { desc = "Copilot: Open agent" })
+  end, { desc = "Copilot Autonomous Agent" })
 end
 
 return M
